@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, h, ref, watch } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import {
   NBreadcrumb,
   NBreadcrumbItem,
   NButton,
   NCard,
+  NConfigProvider,
   NDrawer,
   NDrawerContent,
   NDropdown,
@@ -26,13 +27,28 @@ import {
   NTabs,
   NTag,
   NText,
+  NTooltip,
   useDialog,
   useMessage,
+  type DropdownOption,
   type MenuOption,
 } from 'naive-ui'
 import { useAuthStore } from '../stores/auth'
 import { usePreferencesStore } from '../stores/preferences'
 import type { AdminMenu } from '../types/api'
+import {
+  IconClose,
+  IconCloseOthers,
+  IconFullscreen,
+  IconFullscreenExit,
+  IconMenu,
+  IconPinLeft,
+  IconPinRight,
+  IconRefresh,
+  IconSettings,
+  dropdownIcon,
+  renderMenuIcon,
+} from '../utils/icons'
 
 interface PageTab {
   path: string
@@ -51,17 +67,23 @@ const passwordVisible = ref(false)
 const passwordLoading = ref(false)
 const passwordForm = ref({ oldPassword: '', newPassword: '', confirmation: '' })
 const tabs = ref<PageTab[]>([])
+const viewKey = ref(0)
+const tabMenuX = ref(0)
+const tabMenuY = ref(0)
+const tabMenuShow = ref(false)
+const tabMenuTarget = ref<PageTab | null>(null)
+const siderCollapsed = ref(false)
+const isFullscreen = ref(false)
 
-// menuOption maps one backend menu node and all descendants into navigation.
 function menuOption(menu: AdminMenu): MenuOption {
   return {
     key: menu.route,
     label: menu.children.length ? menu.name : () => h(RouterLink, { to: menu.route }, { default: () => menu.name }),
+    icon: renderMenuIcon(menu.icon),
     children: menu.children.length ? menu.children.map(menuOption) : undefined,
   }
 }
 
-// menuItems renders only the current administrator's backend-assigned menus.
 const menuItems = computed<MenuOption[]>(() => auth.menus.map(menuOption))
 
 const breadcrumbItems = computed(() => {
@@ -70,6 +92,8 @@ const breadcrumbItems = computed(() => {
   if (route.meta.title) values.push(String(route.meta.title))
   return values
 })
+
+// Sider always light background (independent of global theme).
 
 watch(
   () => route.path,
@@ -82,9 +106,11 @@ watch(
   { immediate: true },
 )
 
-// closeTab removes a visited page while keeping at least the dashboard available.
-async function closeTab(path: string): Promise<void> {
+async function closeTab(name: string | number): Promise<void> {
+  const path = String(name)
+  if (path === '/dashboard') return
   const index = tabs.value.findIndex((item) => item.path === path)
+  if (index < 0) return
   tabs.value = tabs.value.filter((item) => item.path !== path)
   if (route.path === path) {
     const target = tabs.value[Math.max(0, index - 1)]?.path ?? '/dashboard'
@@ -92,7 +118,75 @@ async function closeTab(path: string): Promise<void> {
   }
 }
 
-// confirmLogout requires confirmation before invalidating the current session.
+function refreshCurrentTab(): void {
+  viewKey.value += 1
+  message.success('已刷新当前页面')
+}
+
+async function closeOtherTabs(targetPath = route.path): Promise<void> {
+  tabs.value = tabs.value.filter((item) => item.path === targetPath || item.path === '/dashboard')
+  if (route.path !== targetPath) await router.push(targetPath)
+}
+
+async function closeTabsToSide(side: 'left' | 'right', targetPath = route.path): Promise<void> {
+  const index = tabs.value.findIndex((item) => item.path === targetPath)
+  if (index < 0) return
+  tabs.value = tabs.value.filter((item, i) => {
+    if (item.path === '/dashboard') return true
+    return side === 'left' ? i >= index : i <= index
+  })
+  if (!tabs.value.some((item) => item.path === route.path)) {
+    await router.push(targetPath)
+  }
+}
+
+const tabActionOptions = computed<DropdownOption[]>(() => [
+  { label: '刷新当前', key: 'refresh', icon: dropdownIcon(IconRefresh) },
+  { label: '关闭当前', key: 'close-current', icon: dropdownIcon(IconClose) },
+  { label: '关闭其他', key: 'close-others', icon: dropdownIcon(IconCloseOthers) },
+  { label: '关闭左侧', key: 'close-left', icon: dropdownIcon(IconPinLeft) },
+  { label: '关闭右侧', key: 'close-right', icon: dropdownIcon(IconPinRight) },
+  { type: 'divider', key: 'd1' },
+  { label: '关闭全部', key: 'close-all', icon: dropdownIcon(IconCloseOthers) },
+])
+
+async function handleTabAction(key: string, targetPath = route.path): Promise<void> {
+  tabMenuShow.value = false
+  if (key === 'refresh') {
+    if (route.path !== targetPath) await router.push(targetPath)
+    refreshCurrentTab()
+    return
+  }
+  if (key === 'close-current') {
+    await closeTab(targetPath)
+    return
+  }
+  if (key === 'close-others') {
+    await closeOtherTabs(targetPath)
+    return
+  }
+  if (key === 'close-left') {
+    await closeTabsToSide('left', targetPath)
+    return
+  }
+  if (key === 'close-right') {
+    await closeTabsToSide('right', targetPath)
+    return
+  }
+  if (key === 'close-all') {
+    tabs.value = tabs.value.filter((item) => item.path === '/dashboard')
+    await router.push('/dashboard')
+  }
+}
+
+function openTabContextMenu(event: MouseEvent, tab: PageTab): void {
+  event.preventDefault()
+  tabMenuTarget.value = tab
+  tabMenuX.value = event.clientX
+  tabMenuY.value = event.clientY
+  tabMenuShow.value = true
+}
+
 function confirmLogout(): void {
   dialog.warning({
     title: '确认退出',
@@ -106,14 +200,12 @@ function confirmLogout(): void {
   })
 }
 
-// handleUserAction opens account workflows from the user menu.
 function handleUserAction(key: string): void {
   if (key === 'profile') profileVisible.value = true
   if (key === 'password') passwordVisible.value = true
   if (key === 'logout') confirmLogout()
 }
 
-// changePassword validates and submits an administrator password change.
 async function changePassword(): Promise<void> {
   const form = passwordForm.value
   if (form.newPassword !== form.confirmation) {
@@ -132,35 +224,104 @@ async function changePassword(): Promise<void> {
     passwordLoading.value = false
   }
 }
+
+async function toggleFullscreen(): Promise<void> {
+  if (!document.fullscreenElement) {
+    await document.documentElement.requestFullscreen()
+    return
+  }
+  await document.exitFullscreen()
+}
+
+function syncFullscreen(): void {
+  isFullscreen.value = Boolean(document.fullscreenElement)
+}
+
+onMounted(() => {
+  document.addEventListener('fullscreenchange', syncFullscreen)
+})
+onUnmounted(() => {
+  document.removeEventListener('fullscreenchange', syncFullscreen)
+})
 </script>
 
 <template>
   <NLayout class="admin-shell" :has-sider="preferences.layout === 'side'">
     <NLayoutSider
       v-if="preferences.layout === 'side'"
+      class="admin-sider"
       bordered
-      :width="236"
       collapse-mode="width"
-      :collapsed-width="76"
-      show-trigger
+      :collapsed="siderCollapsed"
+      :collapsed-width="72"
+      :width="236"
+      show-trigger="bar"
+      @update:collapsed="(value) => (siderCollapsed = value)"
     >
-      <RouterLink to="/dashboard" class="brand brand--admin" aria-label="Fat Bird 管理后台">
-        <img class="brand__image" src="/fatBird-admin-horizontal.png" alt="Fat Bird 管理后台">
-        <img class="brand__collapsed-logo" src="/logoAdmin-tight.png" alt="">
-      </RouterLink>
-      <NMenu :value="route.path" :options="menuItems" :indent="22" />
+      <NConfigProvider :theme="null">
+        <RouterLink to="/dashboard" class="brand brand--admin" aria-label="Fat Bird 管理后台">
+          <img class="brand__image" src="/fatBird-admin-horizontal.png" alt="Fat Bird 管理后台">
+          <img class="brand__collapsed-logo" src="/logoAdmin-tight.png" alt="">
+        </RouterLink>
+        <NMenu
+          class="admin-menu"
+          :value="route.path"
+          :collapsed="siderCollapsed"
+          :collapsed-width="72"
+          :collapsed-icon-size="20"
+          :options="menuItems"
+          :indent="22"
+        />
+      </NConfigProvider>
     </NLayoutSider>
 
     <NLayout>
       <NLayoutHeader bordered class="admin-header">
-        <div class="header-brand-menu">
-          <RouterLink v-if="preferences.layout === 'top'" to="/dashboard" class="brand brand--top" aria-label="Fat Bird 管理后台">
-            <img class="brand__image" src="/fatBird-admin-horizontal.png" alt="Fat Bird 管理后台">
-          </RouterLink>
-          <NMenu v-if="preferences.layout === 'top'" mode="horizontal" :value="route.path" :options="menuItems" />
+        <div class="header-left">
+          <template v-if="preferences.layout === 'side'">
+            <NTooltip>
+              <template #trigger>
+                <NButton quaternary circle class="header-icon-btn" @click="siderCollapsed = !siderCollapsed">
+                  <IconMenu :size="18" />
+                </NButton>
+              </template>
+              {{ siderCollapsed ? '展开菜单' : '收起菜单' }}
+            </NTooltip>
+          </template>
+          <NTooltip>
+            <template #trigger>
+              <NButton quaternary circle class="header-icon-btn" @click="refreshCurrentTab">
+                <IconRefresh :size="17" />
+              </NButton>
+            </template>
+            刷新页面
+          </NTooltip>
+          <div v-if="preferences.layout === 'top'" class="header-brand-menu">
+            <RouterLink to="/dashboard" class="brand brand--top" aria-label="Fat Bird 管理后台">
+              <img class="brand__image" src="/fatBird-admin-horizontal.png" alt="Fat Bird 管理后台">
+            </RouterLink>
+            <NMenu mode="horizontal" :value="route.path" :options="menuItems" />
+          </div>
         </div>
-        <NSpace align="center" :wrap="false">
-          <NButton quaternary circle title="界面设置" @click="settingsVisible = true">⚙</NButton>
+
+        <NSpace align="center" :wrap="false" :size="8">
+          <NTooltip>
+            <template #trigger>
+              <NButton quaternary circle class="header-icon-btn" @click="toggleFullscreen">
+                <IconFullscreenExit v-if="isFullscreen" :size="17" />
+                <IconFullscreen v-else :size="17" />
+              </NButton>
+            </template>
+            {{ isFullscreen ? '退出全屏' : '全屏' }}
+          </NTooltip>
+          <NTooltip>
+            <template #trigger>
+              <NButton quaternary circle class="header-icon-btn" @click="settingsVisible = true">
+                <IconSettings :size="17" />
+              </NButton>
+            </template>
+            界面设置
+          </NTooltip>
           <NDropdown
             trigger="click"
             :options="[
@@ -173,8 +334,8 @@ async function changePassword(): Promise<void> {
           >
             <NButton text class="user-trigger">
               <span class="user-avatar">{{ auth.currentUser?.nickname?.slice(0, 1) || 'A' }}</span>
-              <span>{{ auth.currentUser?.nickname || auth.currentUser?.username }}</span>
-              <span class="dropdown-arrow">⌄</span>
+              <span class="user-name">{{ auth.currentUser?.nickname || auth.currentUser?.username }}</span>
+              <span class="dropdown-caret" aria-hidden="true" />
             </NButton>
           </NDropdown>
         </NSpace>
@@ -186,16 +347,42 @@ async function changePassword(): Promise<void> {
         </NBreadcrumb>
       </div>
 
-      <div v-if="preferences.showTabs" class="page-tabs">
-        <NTabs type="card" :value="route.path" @update:value="(value) => router.push(String(value))">
-          <NTab v-for="tab in tabs" :key="tab.path" :name="tab.path" :closable="tab.path !== '/dashboard'" @close="closeTab(tab.path)">
+      <div v-if="preferences.showTabs" class="page-tabs-row">
+        <NTabs
+          class="page-tabs"
+          type="card"
+          :value="route.path"
+          @update:value="(value) => router.push(String(value))"
+          @close="closeTab"
+        >
+          <NTab
+            v-for="tab in tabs"
+            :key="tab.path"
+            :name="tab.path"
+            :closable="tab.path !== '/dashboard'"
+            @contextmenu="openTabContextMenu($event, tab)"
+          >
             {{ tab.title }}
           </NTab>
         </NTabs>
+        <NDropdown trigger="click" :options="tabActionOptions" @select="(key) => handleTabAction(String(key))">
+          <NButton quaternary size="small" class="tab-ops-btn" title="标签页操作">⋯</NButton>
+        </NDropdown>
       </div>
 
+      <NDropdown
+        placement="bottom-start"
+        trigger="manual"
+        :x="tabMenuX"
+        :y="tabMenuY"
+        :show="tabMenuShow"
+        :options="tabActionOptions"
+        @clickoutside="tabMenuShow = false"
+        @select="(key) => handleTabAction(String(key), tabMenuTarget?.path ?? route.path)"
+      />
+
       <NLayoutContent class="admin-content">
-        <RouterView />
+        <RouterView :key="`${route.path}-${viewKey}`" />
       </NLayoutContent>
     </NLayout>
   </NLayout>

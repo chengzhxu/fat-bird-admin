@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { request, setAccessToken } from '../api/client'
+import { ApiError, getAccessToken, request, setAccessToken } from '../api/client'
 import type { AdminMenu, AuthUser } from '../types/api'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -34,6 +34,38 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  // bootstrap restores session from cached access token; refresh only on 401/expiry.
+  async function bootstrap(): Promise<void> {
+    if (initialized.value) return
+    const token = getAccessToken()
+    if (token) {
+      try {
+        await loadCurrentUser()
+        return
+      } catch (error) {
+        const expired = error instanceof ApiError && (error.status === 401 || error.code === 40100 || error.code === 40101)
+        setAccessToken('')
+        if (!expired) {
+          initialized.value = true
+          return
+        }
+      }
+    }
+    try {
+      // Cookie refresh only when no usable access token remains.
+      const me = await request<AuthUser>('/auth/me')
+      currentUser.value = me
+      if (!me.mustChangePassword) {
+        menus.value = (await request<{ list: AdminMenu[] }>('/menus/current')).list
+      }
+    } catch {
+      currentUser.value = null
+      menus.value = []
+    } finally {
+      initialized.value = true
+    }
+  }
+
   async function changePassword(oldPassword: string, newPassword: string): Promise<void> {
     await request('/auth/password', {
       method: 'PUT',
@@ -51,8 +83,9 @@ export const useAuthStore = defineStore('auth', () => {
       currentUser.value = null
       menus.value = []
       setAccessToken('')
+      initialized.value = true
     }
   }
 
-  return { currentUser, menus, initialized, isAuthenticated, login, loadCurrentUser, changePassword, logout }
+  return { currentUser, menus, initialized, isAuthenticated, login, loadCurrentUser, bootstrap, changePassword, logout }
 })

@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watchEffect } from 'vue'
 import { NConfigProvider, NDialogProvider, NMessageProvider, darkTheme, zhCN, dateZhCN } from 'naive-ui'
 import { usePreferencesStore } from './stores/preferences'
 
 const preferences = usePreferencesStore()
 const theme = computed(() => preferences.isDark ? darkTheme : null)
+
+watchEffect(() => {
+  document.documentElement.classList.toggle('dark', preferences.isDark)
+})
 </script>
 
 <template>

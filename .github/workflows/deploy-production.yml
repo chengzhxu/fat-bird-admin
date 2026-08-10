@@ -1,0 +1,64 @@
+name: Test and deploy production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fat-bird-admin-production
+  cancel-in-progress: false
+
+jobs:
+  test-build-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+
+      - name: Enable pinned pnpm
+        run: corepack enable && corepack prepare pnpm@10.28.2 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm exec vitest run --passWithNoTests
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Package release
+        run: tar --format=posix -czf "fat-bird-admin-${GITHUB_SHA}.tar.gz" -C dist .
+
+      - name: Configure deployment SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/fat-bird-deploy
+          chmod 600 ~/.ssh/fat-bird-deploy
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Upload and activate release
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          scp -P "$DEPLOY_PORT" -i ~/.ssh/fat-bird-deploy "fat-bird-admin-${GITHUB_SHA}.tar.gz" "$DEPLOY_USER@$DEPLOY_HOST:incoming/"
+          ssh -p "$DEPLOY_PORT" -i ~/.ssh/fat-bird-deploy "$DEPLOY_USER@$DEPLOY_HOST" "sudo /usr/local/sbin/deploy-fat-bird-admin '$GITHUB_SHA'"
+
+      - name: Verify public site
+        run: curl --fail --silent --show-error --retry 5 --retry-delay 3 --max-time 20 https://fbadmin.runkc.cn/ >/dev/null

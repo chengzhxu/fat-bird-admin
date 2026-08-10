@@ -29,11 +29,7 @@ router.beforeEach(async (to) => {
   const auth = useAuthStore()
   if (to.meta.public) return true
   if (!auth.initialized) {
-    try {
-      await auth.loadCurrentUser()
-    } catch {
-      return '/login'
-    }
+    await auth.bootstrap()
   }
   if (!auth.isAuthenticated) return '/login'
   if (auth.currentUser?.mustChangePassword && to.path !== '/change-password') {

@@ -1,6 +1,7 @@
 import type { ApiEnvelope } from '../types/api'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '/api/v1/admin'
+const ACCESS_TOKEN_KEY = 'fatbird.admin.accessToken'
 
 let accessToken = ''
 let refreshPromise: Promise<boolean> | null = null
@@ -15,9 +16,35 @@ export class ApiError extends Error {
   }
 }
 
+function readStoredToken(): string {
+  try {
+    return sessionStorage.getItem(ACCESS_TOKEN_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function writeStoredToken(token: string): void {
+  try {
+    if (token) sessionStorage.setItem(ACCESS_TOKEN_KEY, token)
+    else sessionStorage.removeItem(ACCESS_TOKEN_KEY)
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
 export function setAccessToken(token: string): void {
   accessToken = token
+  writeStoredToken(token)
 }
+
+export function getAccessToken(): string {
+  if (!accessToken) accessToken = readStoredToken()
+  return accessToken
+}
+
+// Restore cached token on module load (browser refresh).
+accessToken = readStoredToken()
 
 // parseEnvelope converts an HTTP response into the shared API envelope with a useful infrastructure error.
 async function parseEnvelope<T>(response: Response): Promise<ApiEnvelope<T>> {
@@ -68,14 +95,18 @@ export async function request<T>(
   if (options.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
+  const token = getAccessToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
   const response = await fetchAPI(path, {
     ...options,
     headers,
     credentials: 'include',
   })
-  if (response.status === 401 && retry && (await refreshAccessToken())) {
-    return request<T>(path, options, false)
+  if (response.status === 401 && retry) {
+    const expired = true
+    if (expired && (await refreshAccessToken())) {
+      return request<T>(path, options, false)
+    }
   }
   const body = await parseEnvelope<T>(response)
   if (!response.ok || body.code !== 200) {
